@@ -4,17 +4,19 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/xml"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/jwtauth/v5"
+	"github.com/gosimple/slug"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/patrickmn/go-cache"
@@ -52,7 +54,7 @@ func main() {
 		r.Post("/api/podcasts/register", registerPodcastHandler)
 	})
 
-	r.Get("/feeds/{userId}/{podcastId}/", podcastFeedHandler)
+	r.Get("/feeds/{userId}/{urlHash}/", podcastFeedHandler)
 	r.Get("/media/{userId}/{mediaPath:.*}", mediaStreamingProxyHandler)
 	
     log.Println("Server starting on :8080")
@@ -107,13 +109,18 @@ func getOrCreatePodcast(dbpool *pgxpool.Pool, feedUrl string) (string, bool, err
 	// semi-unique hash generator
 	cleanedUrl := cleanUpUrl(feedUrl)
 	hashBytes := sha256.Sum256([]byte(cleanedUrl))
-	hashString := hex.EncodeToString(hashBytes[:])
+	hashString := hex.EncodeToString(hashBytes[:8]) // 16 chars
 
-	var id string
-	err := dbpool.QueryRow(context.Background(), "SELECT id from podcasts WHERE url_hash = $1", hashString).Scan(&id)
+	sliceRange := min(50, len(cleanedUrl))
+	slugged := slug.Make(cleanedUrl[:sliceRange])
+	hashString = slugged + "-" + hashString
+	log.Printf("Generated hashString: %s", hashString)
+
+	var dbHash string; // should be the same
+	err := dbpool.QueryRow(context.Background(), "SELECT url_hash from podcasts WHERE url_hash = $1", hashString).Scan(&dbHash)
 	if (err == nil){
 		// found the entry
-		return id, false, nil
+		return dbHash, false, nil
 	}
 
 	if (err.Error() != "no rows in result set"){
@@ -122,19 +129,20 @@ func getOrCreatePodcast(dbpool *pgxpool.Pool, feedUrl string) (string, bool, err
 	}
 
 	// no existing entry, create one
-	err = dbpool.QueryRow(context.Background(), "INSERT INTO podcasts (feed_url, url_hash) VALUES ($1, $2) RETURNING id", feedUrl, hashString).Scan(&id)
+
+	err = dbpool.QueryRow(context.Background(), "INSERT INTO podcasts (feed_url, url_hash) VALUES ($1, $2) RETURNING url_hash", feedUrl, hashString).Scan(&dbHash)
 	if (err != nil){
 		return "", false, err
 	}
-	return id, true, nil
+	return dbHash, true, nil
 }
 
 func podcastFeedHandler(w http.ResponseWriter, r *http.Request){
 	userId := chi.URLParam(r, "userId")
-	podcastId := chi.URLParam(r, "podcastId")
-	log.Printf("UserID: %s, PodcastID: %s", userId, podcastId)
+	urlHash := chi.URLParam(r, "urlHash")
+	log.Printf("UserID: %s, PodcastID: %s", userId, urlHash)
 
-	cacheId := userId + ":" + podcastId
+	cacheId := userId + ":" + urlHash
 
 	// Try cache first
     if cached, found := feedCache.Get(cacheId); found {
@@ -145,7 +153,7 @@ func podcastFeedHandler(w http.ResponseWriter, r *http.Request){
     }
 	
 	var feedUrl string
-	err := dbpool.QueryRow(context.Background(), "SELECT feed_url from podcasts WHERE id = $1", podcastId).Scan(&feedUrl)
+	err := dbpool.QueryRow(context.Background(), "SELECT feed_url from podcasts WHERE url_hash = $1", urlHash).Scan(&feedUrl)
 	if err != nil{
 		http.Error(w, "podcast not found", http.StatusNotFound)
 		return
@@ -164,60 +172,56 @@ func podcastFeedHandler(w http.ResponseWriter, r *http.Request){
 	}
 	defer resp.Body.Close()
 
-	// Read and parse feed
 	feedContent, err := io.ReadAll(resp.Body)
 	if err != nil {
 		http.Error(w, "failed to read feed", http.StatusInternalServerError)
 		return
 	}
 
-	// Parse XML
-	var rss RSS
-	err = xml.Unmarshal(feedContent, &rss)
-	if err != nil {
-		log.Printf("Failed to parse XML: %v", err)
-		// If parsing fails, just return original feed
-		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-		w.Write(feedContent)
-		return
-	}
+	modifiedFeed := rewriteEnclosureURLs(string(feedContent), userId)
 
-	// Rewrite media URLs in each item
-	for i := range rss.Channel.Items {
-		originalURL := rss.Channel.Items[i].Enclosure.URL
-		if originalURL != "" {
-			// URL encode the original media URL
-			encodedURL := url.QueryEscape(originalURL)
-			// Create our proxy URL
-			proxyURL := fmt.Sprintf("http://localhost:8080/media/%s/%s", userId, encodedURL)
-			rss.Channel.Items[i].Enclosure.URL = proxyURL
-			
-			log.Printf("Rewrote URL: %s -> %s", originalURL, proxyURL)
-		}
-	}
-
-	// pretty print back to XML
-	modifiedFeed, err := xml.MarshalIndent(rss, "", "  ")
-	if err != nil {
-		log.Printf("Failed to marshal XML: %v", err)
-		http.Error(w, "failed to generate feed", http.StatusInternalServerError)
-		return
-	}
-
-	xmlHeader := []byte(xml.Header)
-	finalFeed := append(xmlHeader, modifiedFeed...)
-	feedCache.Set(cacheId, finalFeed, cache.DefaultExpiration)
+	feedCache.Set(cacheId, []byte(modifiedFeed), cache.DefaultExpiration)
 	
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=1800")
-	w.Write(finalFeed)
+	w.Write([]byte(modifiedFeed))
+}
+
+// rewriteEnclosureURLs finds all <enclosure url="..."> tags and rewrites the URLs
+func rewriteEnclosureURLs(feedXML string, userId string) string {
+	// Regex to match <enclosure url="..." ...> or <enclosure ... url="..." ...>
+	// This captures the URL value in group 1
+	re := regexp.MustCompile(`<enclosure\s+([^>]*?\s+)?url="([^"]+)"([^>]*?)>`)
+	
+	result := re.ReplaceAllStringFunc(feedXML, func(match string) string {
+		// Extract the URL from the match
+		urlRe := regexp.MustCompile(`url="([^"]+)"`)
+		urlMatch := urlRe.FindStringSubmatch(match)
+		
+		if len(urlMatch) < 2 {
+			return match // No URL found, return unchanged
+		}
+		
+		originalURL := urlMatch[1]
+		
+		// Create proxy URL
+		encodedURL := url.QueryEscape(originalURL)
+		proxyURL := fmt.Sprintf("http://localhost:8080/media/%s/%s", userId, encodedURL)
+		
+		log.Printf("Rewriting: %s -> %s", originalURL, proxyURL)
+		
+		// Replace the URL in the original match
+		return strings.Replace(match, originalURL, proxyURL, 1)
+	})
+	
+	return result
 }
 
 
-func mediaStreamingProxyHandler(w http.ResponseWriter, r *http.Request){
+func mediaStreamingProxyHandler(w http.ResponseWriter, r *http.Request) {
 	userId := chi.URLParam(r, "userId")
 	encodedMediaPath := chi.URLParam(r, "mediaPath")
-	
+
 	// Decode the original media URL
 	originalURL, err := url.QueryUnescape(encodedMediaPath)
 	if err != nil {
@@ -225,22 +229,23 @@ func mediaStreamingProxyHandler(w http.ResponseWriter, r *http.Request){
 		http.Error(w, "Invalid media URL", http.StatusBadRequest)
 		return
 	}
-	
+
 	log.Printf("Media request - UserID: %s, Original URL: %s", userId, originalURL)
 
-	// Create request to original URL
 	client := &http.Client{
-		Timeout: 30 * time.Second,
+		// No timeout for streaming, or use a very long one
+		Timeout: 0, 
 	}
-	
-	req, err := http.NewRequest("GET", originalURL, nil)
+
+	// FIX: Use NewRequestWithContext to handle client disconnects
+	req, err := http.NewRequestWithContext(r.Context(), "GET", originalURL, nil)
 	if err != nil {
 		log.Printf("Failed to create request: %v", err)
 		http.Error(w, "Failed to fetch media", http.StatusInternalServerError)
 		return
 	}
 
-	// Forward Range header if present (for seeking in podcast apps)
+	// Forward Range header if present
 	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
 		req.Header.Set("Range", rangeHeader)
 		log.Printf("Forwarding Range header: %s", rangeHeader)
@@ -251,38 +256,62 @@ func mediaStreamingProxyHandler(w http.ResponseWriter, r *http.Request){
 		req.Header.Set("User-Agent", ua)
 	}
 
-	// Fetch from origin
 	resp, err := client.Do(req)
 	if err != nil {
+		// Handle context cancellation specifically to avoid log noise
+		if r.Context().Err() != nil {
+			log.Printf("Client disconnected user %s", userId)
+			return
+		}
 		log.Printf("Failed to fetch media: %v", err)
 		http.Error(w, "Failed to fetch media", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
-	// Copy response headers
+	// FIX: Careful Header Copying
+	// Do not copy hop-by-hop headers or Content-Encoding/Length if body is modified/decoded
+	hopByHop := map[string]bool{
+		"Connection": true,
+		"Keep-Alive": true,
+		"Proxy-Authenticate": true,
+		"Proxy-Authorization": true,
+		"Te": true,
+		"Trailers": true,
+		"Transfer-Encoding": true,
+		"Upgrade": true,
+	}
+
 	for key, values := range resp.Header {
+		if hopByHop[key] {
+			continue
+		}
+		// Go's http.Client automatically decompresses GZIP.
+		// If we forward "Content-Encoding: gzip", the client expects compressed data
+		// but receives raw data, causing playback failure.
+		if key == "Content-Encoding" {
+			continue
+		}
+		// Content-Length might be wrong if we decoded the body.
+		// It's safer to let the Transfer-Encoding: chunked handle it, 
+		// unless we are sure we are sending the exact bytes.
+		// Since Go decompresses, size changes. Drop it.
+		if key == "Content-Length" && resp.Uncompressed {
+			continue
+		}
+
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
 
-	// should be 206 Partial Content
 	w.WriteHeader(resp.StatusCode)
 
-	// Stream the content
-	// io.Copy handles chunked transfer efficiently
 	written, err := io.Copy(w, resp.Body)
 	if err != nil {
-		// Don't send error response here - headers already sent
 		log.Printf("Error streaming media: %v (wrote %d bytes)", err, written)
 		return
 	}
 
 	log.Printf("Successfully streamed %d bytes to user %s", written, userId)
-	
-	// TODO: After successful stream, you could:
-	// - Register this episode for transcription if >30 seconds played
-	// - Update user's listening history
-	// - Track position for resume functionality
 }
