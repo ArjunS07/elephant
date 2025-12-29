@@ -191,8 +191,8 @@ func podcastFeedHandler(w http.ResponseWriter, r *http.Request){
 func rewriteEnclosureURLs(feedXML string, userId string) string {
 	// Regex to match <enclosure url="..." ...> or <enclosure ... url="..." ...>
 	// This captures the URL value in group 1
-	re := regexp.MustCompile(`<enclosure\s+([^>]*?\s+)?url="([^"]+)"([^>]*?)>`)
-	
+	re := regexp.MustCompile(`(?i)<enclosure[^>]+url=["']([^"']+)["'][^>]*>`)
+
 	result := re.ReplaceAllStringFunc(feedXML, func(match string) string {
 		// Extract the URL from the match
 		urlRe := regexp.MustCompile(`url="([^"]+)"`)
@@ -217,101 +217,108 @@ func rewriteEnclosureURLs(feedXML string, userId string) string {
 	return result
 }
 
-
 func mediaStreamingProxyHandler(w http.ResponseWriter, r *http.Request) {
-	userId := chi.URLParam(r, "userId")
-	encodedMediaPath := chi.URLParam(r, "mediaPath")
+    userId := chi.URLParam(r, "userId")
+	log.Printf("Media request for user: %s", userId)
+    encodedMediaPath := chi.URLParam(r, "mediaPath")
 
-	// Decode the original media URL
-	originalURL, err := url.QueryUnescape(encodedMediaPath)
-	if err != nil {
-		log.Printf("Failed to decode media path: %v", err)
-		http.Error(w, "Invalid media URL", http.StatusBadRequest)
-		return
-	}
+    originalURL, err := url.QueryUnescape(encodedMediaPath)
+    if err != nil {
+        http.Error(w, "Invalid media URL", http.StatusBadRequest)
+        return
+    }
 
-	log.Printf("Media request - UserID: %s, Original URL: %s", userId, originalURL)
+    // 1. Handle HEAD requests explicitly
+    // Podcast apps use this to check file size without downloading
+    if r.Method == "HEAD" {
+        handleHeadRequest(w, r, originalURL)
+        return
+    }
 
-	client := &http.Client{
-		// No timeout for streaming, or use a very long one
-		Timeout: 0, 
-	}
+    client := &http.Client{
+        Timeout: 120 * time.Minute, 
+    }
 
-	// FIX: Use NewRequestWithContext to handle client disconnects
-	req, err := http.NewRequestWithContext(r.Context(), "GET", originalURL, nil)
-	if err != nil {
-		log.Printf("Failed to create request: %v", err)
-		http.Error(w, "Failed to fetch media", http.StatusInternalServerError)
-		return
-	}
+    req, err := http.NewRequestWithContext(r.Context(), "GET", originalURL, nil)
+    if err != nil {
+        http.Error(w, "Failed to create request", http.StatusInternalServerError)
+        return
+    }
 
-	// Forward Range header if present
-	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
-		req.Header.Set("Range", rangeHeader)
-		log.Printf("Forwarding Range header: %s", rangeHeader)
-	}
+    // 2. Forward Essential Headers
+    copyHeader(r.Header, req.Header, "Range")
+    copyHeader(r.Header, req.Header, "User-Agent")
+    
+    // 3. Analytics: Forward the real user IP
+    // Podcasters rely on this for IAB v2 certification.
+    if clientIP := r.Header.Get("X-Forwarded-For"); clientIP != "" {
+        req.Header.Set("X-Forwarded-For", clientIP+", "+r.RemoteAddr)
+    } else {
+        req.Header.Set("X-Forwarded-For", r.RemoteAddr)
+    }
 
-	// Forward User-Agent
-	if ua := r.Header.Get("User-Agent"); ua != "" {
-		req.Header.Set("User-Agent", ua)
-	}
+    resp, err := client.Do(req)
+    if err != nil {
+        // Suppress logs for client disconnects
+        if r.Context().Err() != nil {
+            return 
+        }
+        log.Printf("Proxy error: %v", err)
+        http.Error(w, "Upstream error", http.StatusBadGateway)
+        return
+    }
+    defer resp.Body.Close()
 
-	resp, err := client.Do(req)
-	if err != nil {
-		// Handle context cancellation specifically to avoid log noise
-		if r.Context().Err() != nil {
-			log.Printf("Client disconnected user %s", userId)
-			return
-		}
-		log.Printf("Failed to fetch media: %v", err)
-		http.Error(w, "Failed to fetch media", http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
+	/*
+	We strictly copy Content-Type and Content-Length to ensure 
+    the player knows the file size/duration.
+	*/
+    headersToForward := []string{
+        "Content-Type",
+        "Content-Length",
+        "Content-Range",
+        "Accept-Ranges",
+        "Last-Modified",
+        "ETag",
+        "Cache-Control",
+    }
 
-	// FIX: Careful Header Copying
-	// Do not copy hop-by-hop headers or Content-Encoding/Length if body is modified/decoded
-	hopByHop := map[string]bool{
-		"Connection": true,
-		"Keep-Alive": true,
-		"Proxy-Authenticate": true,
-		"Proxy-Authorization": true,
-		"Te": true,
-		"Trailers": true,
-		"Transfer-Encoding": true,
-		"Upgrade": true,
-	}
+    for _, h := range headersToForward {
+        if v := resp.Header.Get(h); v != "" {
+            w.Header().Set(h, v)
+        }
+    }
 
-	for key, values := range resp.Header {
-		if hopByHop[key] {
-			continue
-		}
-		// Go's http.Client automatically decompresses GZIP.
-		// If we forward "Content-Encoding: gzip", the client expects compressed data
-		// but receives raw data, causing playback failure.
-		if key == "Content-Encoding" {
-			continue
-		}
-		// Content-Length might be wrong if we decoded the body.
-		// It's safer to let the Transfer-Encoding: chunked handle it, 
-		// unless we are sure we are sending the exact bytes.
-		// Since Go decompresses, size changes. Drop it.
-		if key == "Content-Length" && resp.Uncompressed {
-			continue
-		}
+    w.WriteHeader(resp.StatusCode)
 
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
+    // Stream the data
+    _, err = io.Copy(w, resp.Body)
+    if err != nil {
+        // Connection drop
+        return
+    }
+}
 
-	w.WriteHeader(resp.StatusCode)
+func handleHeadRequest(w http.ResponseWriter, r *http.Request, targetURL string) {
+    req, _ := http.NewRequestWithContext(r.Context(), "HEAD", targetURL, nil)
+    client := &http.Client{Timeout: 5 * time.Second}
+    
+    resp, err := client.Do(req)
+    if err != nil {
+        http.Error(w, "Upstream unreachable", http.StatusBadGateway)
+        return
+    }
+    defer resp.Body.Close()
 
-	written, err := io.Copy(w, resp.Body)
-	if err != nil {
-		log.Printf("Error streaming media: %v (wrote %d bytes)", err, written)
-		return
-	}
+    // Forward size and type
+    w.Header().Set("Content-Length", resp.Header.Get("Content-Length"))
+    w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+    w.Header().Set("Accept-Ranges", resp.Header.Get("Accept-Ranges"))
+    w.WriteHeader(resp.StatusCode)
+}
 
-	log.Printf("Successfully streamed %d bytes to user %s", written, userId)
+func copyHeader(src http.Header, dest http.Header, key string) {
+    if val := src.Get(key); val != "" {
+        dest.Set(key, val)
+    }
 }
