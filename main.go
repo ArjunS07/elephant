@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -51,6 +53,7 @@ func main() {
 	})
 
 	r.Get("/feeds/{userId}/{podcastId}/", podcastFeedHandler)
+	r.Get("/media/{userId}/{mediaPath:.*}", mediaStreamingProxyHandler)
 	
     log.Println("Server starting on :8080")
     log.Fatal(http.ListenAndServe(":8080", r))
@@ -161,22 +164,125 @@ func podcastFeedHandler(w http.ResponseWriter, r *http.Request){
 	}
 	defer resp.Body.Close()
 
-	// Read feed content
+	// Read and parse feed
 	feedContent, err := io.ReadAll(resp.Body)
 	if err != nil {
 		http.Error(w, "failed to read feed", http.StatusInternalServerError)
 		return
 	}
 
-	// TODO: Parse and rewrite media URLs here
-	feedCache.Set(cacheId, feedContent, cache.DefaultExpiration)
+	// Parse XML
+	var rss RSS
+	err = xml.Unmarshal(feedContent, &rss)
+	if err != nil {
+		log.Printf("Failed to parse XML: %v", err)
+		// If parsing fails, just return original feed
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		w.Write(feedContent)
+		return
+	}
+
+	// Rewrite media URLs in each item
+	for i := range rss.Channel.Items {
+		originalURL := rss.Channel.Items[i].Enclosure.URL
+		if originalURL != "" {
+			// URL encode the original media URL
+			encodedURL := url.QueryEscape(originalURL)
+			// Create our proxy URL
+			proxyURL := fmt.Sprintf("http://localhost:8080/media/%s/%s", userId, encodedURL)
+			rss.Channel.Items[i].Enclosure.URL = proxyURL
+			
+			log.Printf("Rewrote URL: %s -> %s", originalURL, proxyURL)
+		}
+	}
+
+	// pretty print back to XML
+	modifiedFeed, err := xml.MarshalIndent(rss, "", "  ")
+	if err != nil {
+		log.Printf("Failed to marshal XML: %v", err)
+		http.Error(w, "failed to generate feed", http.StatusInternalServerError)
+		return
+	}
+
+	xmlHeader := []byte(xml.Header)
+	finalFeed := append(xmlHeader, modifiedFeed...)
+	feedCache.Set(cacheId, finalFeed, cache.DefaultExpiration)
 	
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-	w.Header().Set("Cache-Control", "public, max-age=1800") // Cache for 0.5 hrs	
-	w.Write(feedContent)
+	w.Header().Set("Cache-Control", "public, max-age=1800")
+	w.Write(finalFeed)
 }
 
 
 func mediaStreamingProxyHandler(w http.ResponseWriter, r *http.Request){
+	userId := chi.URLParam(r, "userId")
+	encodedMediaPath := chi.URLParam(r, "mediaPath")
+	
+	// Decode the original media URL
+	originalURL, err := url.QueryUnescape(encodedMediaPath)
+	if err != nil {
+		log.Printf("Failed to decode media path: %v", err)
+		http.Error(w, "Invalid media URL", http.StatusBadRequest)
+		return
+	}
+	
+	log.Printf("Media request - UserID: %s, Original URL: %s", userId, originalURL)
 
+	// Create request to original URL
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+	
+	req, err := http.NewRequest("GET", originalURL, nil)
+	if err != nil {
+		log.Printf("Failed to create request: %v", err)
+		http.Error(w, "Failed to fetch media", http.StatusInternalServerError)
+		return
+	}
+
+	// Forward Range header if present (for seeking in podcast apps)
+	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+		req.Header.Set("Range", rangeHeader)
+		log.Printf("Forwarding Range header: %s", rangeHeader)
+	}
+
+	// Forward User-Agent
+	if ua := r.Header.Get("User-Agent"); ua != "" {
+		req.Header.Set("User-Agent", ua)
+	}
+
+	// Fetch from origin
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Failed to fetch media: %v", err)
+		http.Error(w, "Failed to fetch media", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	// should be 206 Partial Content
+	w.WriteHeader(resp.StatusCode)
+
+	// Stream the content
+	// io.Copy handles chunked transfer efficiently
+	written, err := io.Copy(w, resp.Body)
+	if err != nil {
+		// Don't send error response here - headers already sent
+		log.Printf("Error streaming media: %v (wrote %d bytes)", err, written)
+		return
+	}
+
+	log.Printf("Successfully streamed %d bytes to user %s", written, userId)
+	
+	// TODO: After successful stream, you could:
+	// - Register this episode for transcription if >30 seconds played
+	// - Update user's listening history
+	// - Track position for resume functionality
 }
