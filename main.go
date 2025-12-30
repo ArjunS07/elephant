@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"regexp"
@@ -55,7 +56,7 @@ func main() {
 	})
 
 	r.Get("/feeds/{userId}/{urlHash}/", podcastFeedHandler)
-	r.Get("/media/{userId}/{mediaPath:.*}", mediaStreamingProxyHandler)
+	r.Get("/media/{userId}/{mediaPath}/{filename}", mediaStreamingProxyHandler)
 	
     log.Println("Server starting on :8080")
     log.Fatal(http.ListenAndServe(":8080", r))
@@ -187,138 +188,73 @@ func podcastFeedHandler(w http.ResponseWriter, r *http.Request){
 	w.Write([]byte(modifiedFeed))
 }
 
-// rewriteEnclosureURLs finds all <enclosure url="..."> tags and rewrites the URLs
 func rewriteEnclosureURLs(feedXML string, userId string) string {
-	// Regex to match <enclosure url="..." ...> or <enclosure ... url="..." ...>
-	// This captures the URL value in group 1
-	re := regexp.MustCompile(`(?i)<enclosure[^>]+url=["']([^"']+)["'][^>]*>`)
+    re := regexp.MustCompile(`(?i)<enclosure[^>]+url=["']([^"']+)["'][^>]*>`)
 
-	result := re.ReplaceAllStringFunc(feedXML, func(match string) string {
-		// Extract the URL from the match
-		urlRe := regexp.MustCompile(`url="([^"]+)"`)
-		urlMatch := urlRe.FindStringSubmatch(match)
-		
-		if len(urlMatch) < 2 {
-			return match // No URL found, return unchanged
-		}
-		
-		originalURL := urlMatch[1]
-		
-		// Create proxy URL
-		encodedURL := url.QueryEscape(originalURL)
-		proxyURL := fmt.Sprintf("http://localhost:8080/media/%s/%s", userId, encodedURL)
-		
-		log.Printf("Rewriting: %s -> %s", originalURL, proxyURL)
-		
-		// Replace the URL in the original match
-		return strings.Replace(match, originalURL, proxyURL, 1)
-	})
-	
-	return result
+    publicHost := os.Getenv("PUBLIC_HOST") 
+    if publicHost == "" {
+        publicHost = "http://localhost:8080"
+    }
+
+    return re.ReplaceAllStringFunc(feedXML, func(match string) string {
+        urlRe := regexp.MustCompile(`url="([^"]+)"`)
+        urlMatch := urlRe.FindStringSubmatch(match)
+        
+        if len(urlMatch) < 2 {
+            return match
+        }
+        
+        originalURL := urlMatch[1]
+        encodedURL := url.QueryEscape(originalURL)
+        
+        // Append "/stream.mp3" so the URL ends in a valid extension
+        proxyURL := fmt.Sprintf("%s/media/%s/%s/stream.mp3", publicHost, userId, encodedURL)
+        
+        return strings.Replace(match, originalURL, proxyURL, 1)
+    })
 }
 
 func mediaStreamingProxyHandler(w http.ResponseWriter, r *http.Request) {
-    userId := chi.URLParam(r, "userId")
-	log.Printf("Media request for user: %s", userId)
     encodedMediaPath := chi.URLParam(r, "mediaPath")
-
-    originalURL, err := url.QueryUnescape(encodedMediaPath)
+    
+    targetURLStr, err := url.QueryUnescape(encodedMediaPath)
     if err != nil {
         http.Error(w, "Invalid media URL", http.StatusBadRequest)
         return
     }
 
-    // 1. Handle HEAD requests explicitly
-    // Podcast apps use this to check file size without downloading
-    if r.Method == "HEAD" {
-        handleHeadRequest(w, r, originalURL)
-        return
-    }
-
-    client := &http.Client{
-        Timeout: 120 * time.Minute, 
-    }
-
-    req, err := http.NewRequestWithContext(r.Context(), "GET", originalURL, nil)
+    targetURL, err := url.Parse(targetURLStr)
     if err != nil {
-        http.Error(w, "Failed to create request", http.StatusInternalServerError)
+        http.Error(w, "Invalid target URL", http.StatusBadRequest)
         return
     }
 
-    // 2. Forward Essential Headers
-    copyHeader(r.Header, req.Header, "Range")
-    copyHeader(r.Header, req.Header, "User-Agent")
-    
-    // 3. Analytics: Forward the real user IP
-    // Podcasters rely on this for IAB v2 certification.
-    if clientIP := r.Header.Get("X-Forwarded-For"); clientIP != "" {
-        req.Header.Set("X-Forwarded-For", clientIP+", "+r.RemoteAddr)
-    } else {
-        req.Header.Set("X-Forwarded-For", r.RemoteAddr)
+    proxy := &httputil.ReverseProxy{
+        Director: func(req *http.Request) {
+            req.URL = targetURL
+            req.Host = targetURL.Host
+            req.URL.Scheme = targetURL.Scheme
+            
+            // remove Authorization header so we don't leak our JWTs to the pocast
+            req.Header.Del("Authorization")
+            
+            if r.Header.Get("Range") != "" {
+                req.Header.Set("Range", r.Header.Get("Range"))
+            }
+            
+            req.Header.Set("User-Agent", r.Header.Get("User-Agent"))
+            
+            if clientIP := r.Header.Get("X-Forwarded-For"); clientIP != "" {
+                req.Header.Set("X-Forwarded-For", clientIP+", "+r.RemoteAddr)
+            } else {
+                req.Header.Set("X-Forwarded-For", r.RemoteAddr)
+            }
+        },
+        ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+            log.Printf("Proxy error: %v", err)
+            w.WriteHeader(http.StatusBadGateway)
+        },
     }
 
-    resp, err := client.Do(req)
-    if err != nil {
-        // Suppress logs for client disconnects
-        if r.Context().Err() != nil {
-            return 
-        }
-        log.Printf("Proxy error: %v", err)
-        http.Error(w, "Upstream error", http.StatusBadGateway)
-        return
-    }
-    defer resp.Body.Close()
-
-	/*
-	We strictly copy Content-Type and Content-Length to ensure 
-    the player knows the file size/duration.
-	*/
-    headersToForward := []string{
-        "Content-Type",
-        "Content-Length",
-        "Content-Range",
-        "Accept-Ranges",
-        "Last-Modified",
-        "ETag",
-        "Cache-Control",
-    }
-
-    for _, h := range headersToForward {
-        if v := resp.Header.Get(h); v != "" {
-            w.Header().Set(h, v)
-        }
-    }
-
-    w.WriteHeader(resp.StatusCode)
-
-    // Stream the data
-    _, err = io.Copy(w, resp.Body)
-    if err != nil {
-        // Connection drop
-        return
-    }
-}
-
-func handleHeadRequest(w http.ResponseWriter, r *http.Request, targetURL string) {
-    req, _ := http.NewRequestWithContext(r.Context(), "HEAD", targetURL, nil)
-    client := &http.Client{Timeout: 5 * time.Second}
-    
-    resp, err := client.Do(req)
-    if err != nil {
-        http.Error(w, "Upstream unreachable", http.StatusBadGateway)
-        return
-    }
-    defer resp.Body.Close()
-
-    // Forward size and type
-    w.Header().Set("Content-Length", resp.Header.Get("Content-Length"))
-    w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
-    w.Header().Set("Accept-Ranges", resp.Header.Get("Accept-Ranges"))
-    w.WriteHeader(resp.StatusCode)
-}
-
-func copyHeader(src http.Header, dest http.Header, key string) {
-    if val := src.Get(key); val != "" {
-        dest.Set(key, val)
-    }
+    proxy.ServeHTTP(w, r)
 }
