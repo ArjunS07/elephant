@@ -1,6 +1,14 @@
 package main
 
-import "os"
+import (
+	"crypto/sha256"
+	"fmt"
+	"net/http"
+	"os"
+
+	"github.com/go-chi/jwtauth/v5"
+	"github.com/gosimple/slug"
+)
 
 func cleanUpUrl(feedUrl string) string {
 	// strip https:// or http:// from the URL for normalization
@@ -26,4 +34,29 @@ func getPublicHost() string {
 		publicHost = "http://localhost:8080"
 	}
 	return publicHost
+}
+
+func genFriendlyUniqueSlug(userId string, showId string, showUrl string) string {
+	// cap to 32 characters
+	feedUrlSlug := slug.Make(cleanUpUrl(showUrl))
+	feedUrlSlug = feedUrlSlug[:min(32, len(feedUrlSlug))]
+
+	// take 32 characters of hash
+	hashBytes := sha256.Sum256([]byte(userId + showId))
+	hashSuffix := fmt.Sprintf("%x", hashBytes)[:8]
+
+	return fmt.Sprintf("%s-%s", feedUrlSlug, hashSuffix)
+}
+
+func getUserShowFeedUrl(slug string) string {
+	return fmt.Sprintf("%s/feeds/%s", getPublicHost(), slug)
+}
+
+func getUserId(r *http.Request) string {
+	_, claims, _ := jwtauth.FromContext(r.Context())
+	userID := claims["user_id"]
+	if userID == nil {
+		return ""
+	}
+	return userID.(string)
 }
