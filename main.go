@@ -158,7 +158,7 @@ func getOrCreateUserPodcast(dbpool *pgxpool.Pool, userId string, showId string, 
 
 func genFriendlyUniqueSlug(userId string, showId string, showUrl string) string {
 	// cap to 32 characters
-	feedUrlSlug := slug.Make(showUrl)
+	feedUrlSlug := slug.Make(cleanUpUrl(showUrl))
 	feedUrlSlug = feedUrlSlug[:min(32, len(feedUrlSlug))]
 
 	// take 32 characters of hash
@@ -369,7 +369,6 @@ func mediaStreamingProxyHandler(w http.ResponseWriter, r *http.Request) {
 		_, dbErr := dbpool.Exec(context.Background(),
 			`UPDATE user_episodes 
      SET total_seconds_played = total_seconds_played + $1,
-         play_count = play_count + 1,
          last_played_at = NOW()
      WHERE id = $2`,
 			secondsPlayed, userEpisodeId)

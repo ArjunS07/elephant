@@ -65,7 +65,6 @@ CREATE TABLE user_episodes (
     
     first_played_at TIMESTAMP DEFAULT NOW(),
     last_played_at TIMESTAMP DEFAULT NOW(),
-    play_count INT DEFAULT 1,
     total_seconds_played INT DEFAULT 0,
 
     UNIQUE (user_id, episode_id)
