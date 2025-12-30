@@ -1,5 +1,7 @@
 package main
 
+import "os"
+
 func cleanUpUrl(feedUrl string) string {
 	// strip https:// or http:// from the URL for normalization
 	cleanUrl := feedUrl
@@ -16,4 +18,12 @@ func cleanUpUrl(feedUrl string) string {
 	}
 
 	return cleanUrl
+}
+
+func getPublicHost() string {
+	publicHost := os.Getenv("PUBLIC_HOST")
+	if publicHost == "" {
+		publicHost = "http://localhost:8080"
+	}
+	return publicHost
 }
