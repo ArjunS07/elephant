@@ -1,6 +1,6 @@
 // Package media proxies episode audio through our server so we can record
 // listening activity (and, later, trigger transcription). The upstream URL is
-// never supplied by the caller — it is looked up from the episode row named by
+// never supplied by the caller. It is looked up from the episode row named by
 // the encrypted token, which closes the SSRF/open-proxy hole.
 package media
 
@@ -18,6 +18,11 @@ import (
 
 // ASSUMED_BITRATE_KBPS is used to estimate seconds-played from bytes streamed.
 const ASSUMED_BITRATE_KBPS = 128
+
+// transcriptionThresholdSeconds is how much cumulative playback must stream
+// before an episode is queued for transcription. It filters out HEAD probes and
+// trivial scrubs. Only genuine engagement crosses it.
+const transcriptionThresholdSeconds = 60
 
 type Handler struct {
 	store  *store.Store
@@ -70,7 +75,7 @@ func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
 	tok := chi.URLParam(r, "token")
 
 	// The token authorizes the user AND names the episode; the audio URL is
-	// NOT a caller parameter — we look it up from the episode row.
+	// not a caller parameter, so we look it up from the episode row.
 	userID, episodeID, err := h.tokens.Parse(tok)
 	if err != nil {
 		http.Error(w, "Invalid token", http.StatusBadRequest)
@@ -152,8 +157,15 @@ func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
 	if counter.count > 0 {
 		bitrate := ASSUMED_BITRATE_KBPS * 1000 // bits per second
 		secondsPlayed := (counter.count * 8) / int64(bitrate)
-		if dbErr := h.store.AddPlaybackSeconds(userEpisodeID, secondsPlayed); dbErr != nil {
+		totalSeconds, dbErr := h.store.AddPlaybackSeconds(userEpisodeID, secondsPlayed)
+		if dbErr != nil {
 			log.Printf("Failed to update progress: %v", dbErr)
+		} else if totalSeconds >= transcriptionThresholdSeconds {
+			// Enough has actually streamed to count as engagement — queue it.
+			// Idempotent, so re-crossing on later requests is harmless.
+			if err := h.store.EnqueueTranscription(episodeID); err != nil {
+				log.Printf("Failed to enqueue transcription: %v", err)
+			}
 		}
 	}
 }

@@ -6,6 +6,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -74,14 +75,19 @@ func (s *Store) FeedURLByShowID(showID string) (string, error) {
 	return feedURL, err
 }
 
-func (s *Store) GetOrCreateEpisode(showID, guid, guidSource, audioURL string) (string, error) {
+// pubDate may be nil when the feed's date is absent or unparseable (stored NULL).
+func (s *Store) GetOrCreateEpisode(showID, guid, guidSource, audioURL, title, description string, pubDate *time.Time) (string, error) {
 	var id string
 	err := s.pool.QueryRow(context.Background(),
-		`INSERT INTO episodes (show_id, guid, guid_source, audio_url)
-		 VALUES ($1, $2, $3, $4)
-		 ON CONFLICT (show_id, guid) DO UPDATE SET audio_url = EXCLUDED.audio_url
+		`INSERT INTO episodes (show_id, guid, guid_source, audio_url, title, description, pub_date)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 ON CONFLICT (show_id, guid) DO UPDATE SET
+		     audio_url   = EXCLUDED.audio_url,
+		     title       = EXCLUDED.title,
+		     description = EXCLUDED.description,
+		     pub_date    = EXCLUDED.pub_date
 		 RETURNING id`,
-		showID, guid, guidSource, audioURL).Scan(&id)
+		showID, guid, guidSource, audioURL, title, description, pubDate).Scan(&id)
 	return id, err
 }
 
@@ -104,12 +110,26 @@ func (s *Store) GetOrCreateUserEpisode(userID, episodeID string) (string, bool, 
 	return id, created, err
 }
 
-func (s *Store) AddPlaybackSeconds(userEpisodeID string, seconds int64) error {
-	_, err := s.pool.Exec(context.Background(),
+// AddPlaybackSeconds increments the user-episode's play time and returns the
+// new cumulative total.
+func (s *Store) AddPlaybackSeconds(userEpisodeID string, seconds int64) (int64, error) {
+	var total int64
+	err := s.pool.QueryRow(context.Background(),
 		`UPDATE user_episodes
 		    SET total_seconds_played = total_seconds_played + $1,
 		        last_played_at = NOW()
-		  WHERE id = $2`,
-		seconds, userEpisodeID)
+		  WHERE id = $2
+		  RETURNING total_seconds_played`,
+		seconds, userEpisodeID).Scan(&total)
+	return total, err
+}
+
+// EnqueueTranscription queues an episode for transcription. Idempotent: the
+// queue is keyed by episode_id, so repeat calls are no-ops.
+func (s *Store) EnqueueTranscription(episodeID string) error {
+	_, err := s.pool.Exec(context.Background(),
+		`INSERT INTO transcription_queue (episode_id) VALUES ($1)
+		 ON CONFLICT (episode_id) DO NOTHING`,
+		episodeID)
 	return err
 }
