@@ -33,10 +33,10 @@ func (h *Handler) userShowFeedURL(s string) string {
 	return fmt.Sprintf("%s/feeds/%s", h.publicHost, s)
 }
 
-// rewriteEnclosures parses the feed for its items, creates/refreshes an episode
-// row per item, and swaps each <enclosure url> for a proxy URL carrying a token.
-// It parses with encoding/xml (reliable extraction) but emits via string
-// replacement on the raw bytes (no re-serialization, so the feed stays intact).
+// parses the feed for its items, creates/refreshes an episode row per item,
+// and swaps each <enclosure url> for a proxy URL carrying a token.
+// It parses with encoding/xml but emits via string
+// replacement on the raw bytes, preventing re-serialization, such that the feed stays intact.
 func (h *Handler) rewriteEnclosures(feedXML []byte, userID, showID string) []byte {
 	var feed rssFeed
 	if err := xml.Unmarshal(feedXML, &feed); err != nil {
@@ -107,9 +107,8 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to fetch podcast feed from provided URL", http.StatusBadRequest)
 		return
 	}
-	cleanedURL := cleanUpURL(feedURL)
-
-	showID, _, err := h.store.GetOrCreateShow(cleanedURL)
+	// Store the raw, fetchable URL (it is used verbatim to fetch the feed later).
+	showID, _, err := h.store.GetOrCreateShow(feedURL)
 	if err != nil {
 		log.Printf("Error: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
