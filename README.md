@@ -35,6 +35,20 @@ Components can be run individually as:
 - Model box: `./run-modelbox.sh`
 - Workers: `./run-worker.sh`, `./run-embedworker.sh`.
 
+### Frontend
+
+Vue 3 + Vite, in `frontend/`.
+
+```
+cd frontend
+npm install
+npm run dev     # dev server on :5173, proxies /api to the Go server on :8080
+npm run build   # emits dist/, which the Go server serves at :8080
+```
+
+In dev, use `:5173` (hot reload, no CORS via the proxy). In prod, run
+`npm run build` and hit the Go server directly.
+
 ### API
 - `POST /api/register`, `POST /api/login`
 - `POST /api/podcasts/register?feed_url=...`
