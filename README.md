@@ -1,23 +1,12 @@
 # elephant
 
-A podcast reverse proxy with transcription and hybrid semantic search.
-
-## Architecture
-
-- **Go server** (`cmd/elephant`) — proxies audio, serves feeds, exposes the search + transcript API.
-- **Transcribe worker** (`worker/`) — drains the transcription queue, runs whisper, writes timestamped segments.
-- **Embed worker** (`worker/`) — chunks segments, embeds them, writes searchable vectors.
-- **Model box** (`modelbox/`) — stateless HTTP service holding the embedder + reranker.
-- **Postgres** (pgvector) — source of truth and both search indexes.
-
-Ingest chains automatically: streaming an episode past a threshold enqueues transcription → segments → embedding → chunks.
-
-## Prerequisites
+## Development instructions
+### Prerequisites
 
 - Docker, Go, Python 3, ffmpeg
-- Apple Silicon (the workers run whisper and embeddings on Metal/MPS)
+- Apple Silicon server (the workers run whisper and embeddings on Metal/MPS)
 
-## Setup
+### Setup
 
 Create `.env` in the repo root:
 
@@ -27,20 +16,28 @@ SECRET_KEY=<jwt signing key>
 ENCRYPTION_KEY=<32-byte token encryption key>
 ```
 
-## Run
+### Run
 
 ```
 ./run-all.sh
 ```
 
-Starts Postgres, the server (`:8080`), the model box (`:8081`), and both workers; Ctrl-C stops everything. Python venvs are built on first run.
+This:
+- Starts Postgres
+- The server (`:8080`)
+- The model box (`:8081`)
+- Both workers
 
-Run pieces individually with `./run.sh` (server + DB), `./run-modelbox.sh`, `./run-worker.sh`, `./run-embedworker.sh`.
+`venv`s are built on the first run.
 
-## API
+Components can be run individually as:
+- Server and DB: `./run.sh`
+- Model box: `./run-modelbox.sh`
+- Workers: `./run-worker.sh`, `./run-embedworker.sh`.
 
-- `POST /api/register`, `POST /api/login` — auth, returns a JWT.
-- `POST /api/podcasts/register?feed_url=...` — subscribe to a feed (JWT).
-- `GET /feeds/{slug}` — rewritten feed with proxied audio URLs.
-- `POST /api/search` — hybrid search, episode-grouped + paginated (JWT).
-- `GET /api/episodes/{id}/transcript` — full transcript (JWT).
+### API
+- `POST /api/register`, `POST /api/login`
+- `POST /api/podcasts/register?feed_url=...`
+- `GET /feeds/{slug}`
+- `POST /api/search`
+- `GET /api/episodes/{id}/transcript`
