@@ -1,2 +1,4 @@
 elephant
 .env
+
+*.DS_Store
