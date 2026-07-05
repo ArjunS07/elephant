@@ -1,3 +1,6 @@
+-- pgvector: halfvec column + HNSW index for semantic search (see V3 SEARCH).
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE TABLE users (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     username      VARCHAR(255) UNIQUE NOT NULL,
@@ -106,3 +109,38 @@ CREATE TABLE transcript_segments (
     text       TEXT NOT NULL,
     PRIMARY KEY (episode_id, idx)
 );
+
+-- ============================================================================
+-- V3 SEARCH
+-- ============================================================================
+
+-- Same crash-safe shape as transcription_queue. The transcribe worker enqueues
+-- an episode here after writing its segments; the embed worker drains it.
+CREATE TABLE embed_queue (
+    episode_id UUID PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
+    priority   INT NOT NULL DEFAULT 1,
+    status     VARCHAR(20) NOT NULL DEFAULT 'pending',
+    attempts   INT NOT NULL DEFAULT 0,
+    last_error TEXT,
+    locked_at  TIMESTAMPTZ,
+    started_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_embed_queue_priority ON embed_queue(status, priority DESC, created_at);
+
+-- Adjacent segments joined into one passage to embed. embedding is bge-base
+-- (768-dim), stored as halfvec to halve the index. start_ms/end_ms span the
+-- contained segments and drive jump-to-timestamp.
+CREATE TABLE transcript_chunks (
+    episode_id UUID NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    idx        INT  NOT NULL,
+    start_ms   INT  NOT NULL,
+    end_ms     INT  NOT NULL,
+    text       TEXT NOT NULL,
+    embedding  halfvec(768) NOT NULL,
+    tsv        tsvector GENERATED ALWAYS AS (to_tsvector('english', text)) STORED,
+    PRIMARY KEY (episode_id, idx)
+);
+CREATE INDEX idx_chunks_embedding ON transcript_chunks
+    USING hnsw (embedding halfvec_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX idx_chunks_tsv ON transcript_chunks USING gin (tsv);
