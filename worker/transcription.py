@@ -57,8 +57,15 @@ def transcribe_episode(conn, episode_id):
         log.info("transcribing episode %s", episode_id)
         result = mlx_whisper.transcribe(wav_path, path_or_hf_repo=WHISPER_MODEL)
 
-    # whisper reports seconds as floats; we store integer milliseconds.
-    return [
-        (i, round(seg["start"] * 1000), round(seg["end"] * 1000), seg["text"].strip())
-        for i, seg in enumerate(result["segments"])
-    ]
+    # whisper reports seconds as floats; we store integer milliseconds. Skip
+    # empty segments, which whisper emits when it hallucinates on trailing
+    # silence, and reindex so idx stays contiguous.
+    segments = []
+    for seg in result["segments"]:
+        text = seg["text"].strip()
+        if not text:
+            continue
+        segments.append(
+            (len(segments), round(seg["start"] * 1000), round(seg["end"] * 1000), text)
+        )
+    return segments
