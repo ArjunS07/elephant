@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log"
 	"os"
 
 	"github.com/joho/godotenv"
@@ -17,7 +18,9 @@ type Config struct {
 // Load reads configuration from the environment. A .env file is loaded
 // best-effort (ignored if absent, since env may be provided another way).
 func Load() Config {
-	_ = godotenv.Load()
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found or error loading .env file")
+	}
 
 	publicHost := os.Getenv("PUBLIC_HOST")
 	if publicHost == "" {
