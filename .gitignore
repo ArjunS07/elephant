@@ -2,3 +2,9 @@ elephant
 .env
 
 *.DS_Store
+
+# Python worker
+worker/.venv/
+__pycache__/
+*.pyc
+worker/testdata/

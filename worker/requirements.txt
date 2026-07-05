@@ -1,0 +1,2 @@
+psycopg[binary]>=3.2
+mlx-whisper>=0.4

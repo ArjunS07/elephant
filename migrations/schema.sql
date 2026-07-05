@@ -39,8 +39,8 @@ CREATE TABLE episodes (
     audio_url        TEXT NOT NULL,                 -- mutable, refreshed on each fetch
     audio_size_bytes BIGINT,
 
-    transcript_status    VARCHAR(20) NOT NULL DEFAULT 'pending',  -- pending|queued|processing|completed|failed
-    transcript_full_text TEXT,
+    transcript_status    VARCHAR(20) NOT NULL DEFAULT 'pending',  -- pending|processing|completed|failed
+    transcript_full_text TEXT,                                     -- derived copy; transcript_segments is authoritative
     transcribed_at       TIMESTAMPTZ,
     transcription_error  TEXT,
 
@@ -66,13 +66,43 @@ CREATE TABLE user_episodes (
 CREATE INDEX idx_user_episodes_user    ON user_episodes(user_id, last_played_at DESC);
 CREATE INDEX idx_user_episodes_episode ON user_episodes(episode_id);
 
--- Transcription work queue (V3)
+-- ============================================================================
+-- V3 TRANSCRIPTION
+--
+-- The Go proxy enqueues an episode here once ~60s of playback streams through
+-- it. A separate Python worker (worker/transcribe.py) polls this queue, fetches
+-- the audio, runs whisper, and writes the timestamped result.
+--
+-- Source of truth for the transcript is transcript_segments (below); the
+-- episodes.transcript_full_text column is only a derived convenience copy.
+-- The queue holds work-in-flight only: on success its row is deleted and the
+-- durable state lives on episodes.transcript_status.
+-- ============================================================================
+
+-- Transcription work queue. status: 'pending' -> 'started' -> ('failed' after
+-- max attempts). Deleted on success.
 CREATE TABLE transcription_queue (
     episode_id         UUID PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
     priority           INT NOT NULL DEFAULT 1,
     requested_by_count INT NOT NULL DEFAULT 1,
     status             VARCHAR(20) NOT NULL DEFAULT 'pending',
+    attempts           INT NOT NULL DEFAULT 0,       -- bumped on each claim
+    last_error         TEXT,                          -- why the last attempt failed
+    locked_at          TIMESTAMPTZ,                   -- lease; stale 'started' rows get reclaimed
     started_at         TIMESTAMPTZ,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX idx_queue_priority ON transcription_queue(status, priority DESC, created_at);
+
+-- Timestamped transcript segments: the authoritative transcript artifact.
+-- One row per whisper segment, in order, with start/end offsets in integer ms.
+-- Downstream chunking snaps to these boundaries; the timestamps are the
+-- jump-to-moment payload.
+CREATE TABLE transcript_segments (
+    episode_id UUID NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    idx        INT  NOT NULL,          -- 0-based order within the episode
+    start_ms   INT  NOT NULL,
+    end_ms     INT  NOT NULL,
+    text       TEXT NOT NULL,
+    PRIMARY KEY (episode_id, idx)
+);
