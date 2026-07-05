@@ -4,6 +4,9 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -61,6 +64,29 @@ func main() {
 	r.Get("/media/{token}/stream.mp3", mediaH.Stream)
 	r.Head("/media/{token}/stream.mp3", mediaH.Stream)
 
+	// Everything else serves the built frontend.
+	r.Handle("/*", spaHandler("frontend/dist"))
+
 	log.Println("Server starting on :8080")
 	log.Fatal(http.ListenAndServe(":8080", r))
+}
+
+// spaHandler serves static files from dir, falling back to index.html for paths
+// that don't map to a file so client-side routes resolve.
+func spaHandler(dir string) http.HandlerFunc {
+	fs := http.FileServer(http.Dir(dir))
+	index := filepath.Join(dir, "index.html")
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, err := os.Stat(filepath.Join(dir, filepath.Clean(r.URL.Path))); os.IsNotExist(err) {
+			// The SPA shell: never cache it, so a new deploy is picked up at once.
+			w.Header().Set("Cache-Control", "no-cache")
+			http.ServeFile(w, r, index)
+			return
+		}
+		// Vite fingerprints asset filenames, so they can be cached forever.
+		if strings.HasPrefix(r.URL.Path, "/assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		}
+		fs.ServeHTTP(w, r)
+	}
 }
