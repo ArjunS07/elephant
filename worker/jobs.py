@@ -64,6 +64,11 @@ def save_result(conn, episode_id, segments):
         conn.execute(
             "DELETE FROM transcription_queue WHERE episode_id = %s", (episode_id,)
         )
+        # Hand the finished transcript off to the embed worker, same commit.
+        conn.execute(
+            "INSERT INTO embed_queue (episode_id) VALUES (%s) ON CONFLICT DO NOTHING",
+            (episode_id,),
+        )
 
 
 def fail_job(conn, episode_id, attempts, err):
