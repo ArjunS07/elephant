@@ -1,7 +1,12 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -59,4 +64,59 @@ func getUserId(r *http.Request) string {
 		return ""
 	}
 	return userID.(string)
+}
+
+func encryptPlainBytestringToAes(bytestring []byte, encryptionKey string) (encoded []byte, err error) {
+	key := []byte(encryptionKey)
+	if len(key) != 32 {
+		return nil, errors.New("encryption key must be 32 bytes")
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+
+	encrypted := gcm.Seal(nonce, nonce, bytestring, nil)
+	return encrypted, nil
+}
+
+func decryptAes256ToPlainByteString(token string, encryptionKey string) (decoded []byte, err error) {
+	key := []byte(encryptionKey)
+	ciphertext, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return nil, err
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return nil, errors.New("invalid token")
+	}
+
+	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, err
+	}
+	return plaintext, nil
 }
