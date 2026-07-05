@@ -13,6 +13,7 @@ type Config struct {
 	SecretKey     string
 	EncryptionKey string
 	PublicHost    string
+	ModelboxURL   string
 }
 
 // Load reads configuration from the environment. A .env file is loaded
@@ -27,10 +28,16 @@ func Load() Config {
 		publicHost = "http://localhost:8080"
 	}
 
+	modelboxURL := os.Getenv("MODELBOX_URL")
+	if modelboxURL == "" {
+		modelboxURL = "http://127.0.0.1:8081"
+	}
+
 	return Config{
 		DatabaseURL:   os.Getenv("DATABASE_URL"),
 		SecretKey:     os.Getenv("SECRET_KEY"),
 		EncryptionKey: os.Getenv("ENCRYPTION_KEY"),
 		PublicHost:    publicHost,
+		ModelboxURL:   modelboxURL,
 	}
 }

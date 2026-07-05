@@ -6,8 +6,11 @@ package store
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -122,6 +125,154 @@ func (s *Store) AddPlaybackSeconds(userEpisodeID string, seconds int64) (int64, 
 		  RETURNING total_seconds_played`,
 		seconds, userEpisodeID).Scan(&total)
 	return total, err
+}
+
+// Chunk is one searchable passage: a run of transcript segments with its episode
+// title and jump-to offsets.
+type Chunk struct {
+	EpisodeID string
+	Idx       int
+	StartMs   int
+	EndMs     int
+	Text      string
+	Title     string
+}
+
+// Both searches restrict to chunks under shows the user is subscribed to, and
+// return rows already in rank order (best first).
+
+// SemanticSearch returns the nearest chunks to queryVec by cosine distance.
+func (s *Store) SemanticSearch(userID string, queryVec []float32, limit int) ([]Chunk, error) {
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT c.episode_id, c.idx, c.start_ms, c.end_ms, c.text, e.title
+		   FROM transcript_chunks c
+		   JOIN episodes e   ON e.id = c.episode_id
+		   JOIN user_shows us ON us.show_id = e.show_id
+		  WHERE us.user_id = $2
+		  ORDER BY c.embedding <=> $1::halfvec
+		  LIMIT $3`,
+		vectorLiteral(queryVec), userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return scanChunks(rows)
+}
+
+// LexicalSearch returns chunks matching the query text, ranked by ts_rank. An
+// empty result is normal (the query may have no lexical hits).
+func (s *Store) LexicalSearch(userID, queryText string, limit int) ([]Chunk, error) {
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT c.episode_id, c.idx, c.start_ms, c.end_ms, c.text, e.title
+		   FROM transcript_chunks c
+		   JOIN episodes e   ON e.id = c.episode_id
+		   JOIN user_shows us ON us.show_id = e.show_id
+		  WHERE us.user_id = $2
+		    AND c.tsv @@ websearch_to_tsquery('english', $1)
+		  ORDER BY ts_rank(c.tsv, websearch_to_tsquery('english', $1)) DESC
+		  LIMIT $3`,
+		queryText, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return scanChunks(rows)
+}
+
+// EpisodeDurations returns each episode's full length in ms (its last chunk's
+// end_ms), keyed by episode_id. The frontend draws the result bar against this.
+func (s *Store) EpisodeDurations(episodeIDs []string) (map[string]int, error) {
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT episode_id, MAX(end_ms) FROM transcript_chunks
+		  WHERE episode_id = ANY($1) GROUP BY episode_id`,
+		episodeIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var id string
+		var dur int
+		if err := rows.Scan(&id, &dur); err != nil {
+			return nil, err
+		}
+		out[id] = dur
+	}
+	return out, rows.Err()
+}
+
+// Segment is one transcript line, the reading unit on the episode page.
+type Segment struct {
+	Idx     int
+	StartMs int
+	EndMs   int
+	Text    string
+}
+
+// EpisodeMeta returns an episode's display fields, but only if the user is
+// subscribed to its show. ok is false when the episode is unknown or unsubscribed
+// (the caller turns that into a 404), matching how search is scoped.
+func (s *Store) EpisodeMeta(userID, episodeID string) (title, description string, pubDate *time.Time, ok bool, err error) {
+	err = s.pool.QueryRow(context.Background(),
+		`SELECT COALESCE(e.title, ''), COALESCE(e.description, ''), e.pub_date
+		   FROM episodes e
+		   JOIN user_shows us ON us.show_id = e.show_id
+		  WHERE e.id = $1 AND us.user_id = $2`,
+		episodeID, userID).Scan(&title, &description, &pubDate)
+	if err == pgx.ErrNoRows {
+		return "", "", nil, false, nil
+	}
+	if err != nil {
+		return "", "", nil, false, err
+	}
+	return title, description, pubDate, true, nil
+}
+
+// TranscriptSegments returns an episode's segments in order.
+func (s *Store) TranscriptSegments(episodeID string) ([]Segment, error) {
+	rows, err := s.pool.Query(context.Background(),
+		"SELECT idx, start_ms, end_ms, text FROM transcript_segments WHERE episode_id = $1 ORDER BY idx",
+		episodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Segment
+	for rows.Next() {
+		var seg Segment
+		if err := rows.Scan(&seg.Idx, &seg.StartMs, &seg.EndMs, &seg.Text); err != nil {
+			return nil, err
+		}
+		out = append(out, seg)
+	}
+	return out, rows.Err()
+}
+
+func scanChunks(rows pgx.Rows) ([]Chunk, error) {
+	defer rows.Close()
+	var out []Chunk
+	for rows.Next() {
+		var c Chunk
+		if err := rows.Scan(&c.EpisodeID, &c.Idx, &c.StartMs, &c.EndMs, &c.Text, &c.Title); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// vectorLiteral formats a vector as pgvector's text form, '[v1,v2,...]', for
+// binding into a halfvec column.
+func vectorLiteral(v []float32) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i, x := range v {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.FormatFloat(float64(x), 'f', -1, 32))
+	}
+	b.WriteByte(']')
+	return b.String()
 }
 
 // EnqueueTranscription queues an episode for transcription. Idempotent: the
