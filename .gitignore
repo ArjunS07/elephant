@@ -3,8 +3,9 @@ elephant
 
 *.DS_Store
 
-# Python worker
+# Python worker + model box
 worker/.venv/
+modelbox/.venv/
 __pycache__/
 *.pyc
 worker/testdata/
