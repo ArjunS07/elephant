@@ -1,0 +1,29 @@
+meta {
+  name: Register podcast
+  type: http
+  seq: 2
+}
+
+post {
+  url: http://localhost:8080/api/podcasts/register?feed_url=https://feeds.megaphone.fm/reutersworldnews
+  body: none
+  auth: inherit
+}
+
+params:query {
+  feed_url: https://feeds.megaphone.fm/reutersworldnews
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+script:post-response {
+  // capture the personal feed URL returned by the API
+  bru.setVar("feedUrl", res.getBody().url);
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}

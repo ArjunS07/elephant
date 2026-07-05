@@ -1,0 +1,28 @@
+meta {
+  name: Register
+  type: http
+  seq: 1
+}
+
+post {
+  url: http://localhost:8080/api/register
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "username": "JohnDoe",
+    "password": "password"
+  }
+}
+
+script:post-response {
+  // capture the JWT so later requests can use {{token}}
+  bru.setVar("token", res.getBody().token);
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}

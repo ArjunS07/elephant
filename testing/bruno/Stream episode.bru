@@ -1,0 +1,20 @@
+meta {
+  name: Stream episode
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{mediaUrl}}
+  body: none
+  auth: inherit
+}
+
+headers {
+  Range: bytes=0-500000
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}
