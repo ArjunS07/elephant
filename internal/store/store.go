@@ -33,7 +33,8 @@ func (s *Store) UserByUsername(username string) (id, passwordHash string, err er
 	return id, passwordHash, err
 }
 
-// expects an already-normalized feed URL.
+// GetOrCreateShow stores the feed URL as given (used verbatim to fetch later);
+// dedup is exact-match on it.
 func (s *Store) GetOrCreateShow(feedURL string) (string, bool, error) {
 	var id string
 	var created bool

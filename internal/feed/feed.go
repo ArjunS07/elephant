@@ -64,8 +64,12 @@ func (h *Handler) rewriteEnclosures(feedXML []byte, userID, showID string) []byt
 			continue
 		}
 
+		// encoding/xml decodes entities when parsing (e.g. &amp; to &), but the raw
+		// feed bytes we're editing still hold the encoded form. Re-escape & so the
+		// search string matches what's actually in the bytes.
+		rawURL := strings.ReplaceAll(audioURL, "&", "&amp;")
 		proxyURL := fmt.Sprintf("%s/media/%s/stream.mp3", h.publicHost, tok)
-		out = strings.Replace(out, audioURL, proxyURL, 1)
+		out = strings.Replace(out, rawURL, proxyURL, 1)
 	}
 	return []byte(out)
 }
