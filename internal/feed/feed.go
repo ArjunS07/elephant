@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gosimple/slug"
@@ -52,7 +53,7 @@ func (h *Handler) rewriteEnclosures(feedXML []byte, userID, showID string) []byt
 		}
 
 		guid, source := resolveGUID(it)
-		episodeID, err := h.store.GetOrCreateEpisode(showID, guid, source, audioURL)
+		episodeID, err := h.store.GetOrCreateEpisode(showID, guid, source, audioURL, it.Title, it.Description, parsePubDate(it.PubDate))
 		if err != nil {
 			log.Printf("Failed to get/create episode: %v", err)
 			continue
@@ -72,6 +73,21 @@ func (h *Handler) rewriteEnclosures(feedXML []byte, userID, showID string) []byt
 		out = strings.Replace(out, rawURL, proxyURL, 1)
 	}
 	return []byte(out)
+}
+
+// parsePubDate parses an RSS date string, trying the formats feeds actually use.
+// Returns nil when empty or unparseable, so the DB stores NULL.
+func parsePubDate(s string) *time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	for _, layout := range []string{time.RFC1123Z, time.RFC1123, time.RFC822Z, time.RFC822} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return &t
+		}
+	}
+	return nil
 }
 
 // resolveGUID returns the item's publisher guid, or a synthesized one (marked
@@ -188,10 +204,11 @@ type channel struct {
 	Items []item `xml:"item"`
 }
 type item struct {
-	GUID      string    `xml:"guid"` // CDATA is unwrapped into the string automatically
-	Title     string    `xml:"title"`
-	PubDate   string    `xml:"pubDate"`
-	Enclosure enclosure `xml:"enclosure"`
+	GUID        string    `xml:"guid"` // CDATA is unwrapped into the string automatically
+	Title       string    `xml:"title"`
+	Description string    `xml:"description"`
+	PubDate     string    `xml:"pubDate"`
+	Enclosure   enclosure `xml:"enclosure"`
 }
 type enclosure struct {
 	URL string `xml:"url,attr"` // ",attr" = an XML attribute, not a child element
