@@ -21,6 +21,7 @@ import (
 	"elephant/internal/media"
 	"elephant/internal/modelbox"
 	"elephant/internal/search"
+	"elephant/internal/shows"
 	"elephant/internal/store"
 	"elephant/internal/token"
 )
@@ -47,6 +48,7 @@ func main() {
 	mediaH := media.New(st, tokens)
 	searchH := search.New(st, mb)
 	episodeH := episode.New(st)
+	showsH := shows.New(st, cfg.PublicHost)
 
 	r := chi.NewRouter()
 	r.Post("/api/register", authH.Register)
@@ -56,6 +58,8 @@ func main() {
 		r.Use(jwtauth.Verifier(tokenAuth))
 		r.Use(jwtauth.Authenticator(tokenAuth))
 		r.Post("/api/podcasts/register", feedH.Register)
+		r.Get("/api/shows", showsH.List)
+		r.Get("/api/shows/{id}", showsH.Detail)
 		r.Post("/api/search", searchH.Search)
 		r.Get("/api/episodes/{id}/transcript", episodeH.Transcript)
 	})
