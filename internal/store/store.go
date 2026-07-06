@@ -284,3 +284,117 @@ func (s *Store) EnqueueTranscription(episodeID string) error {
 		episodeID)
 	return err
 }
+
+// UpdateShowMeta refreshes a show's display fields from a feed fetch. Empty
+// values are ignored (NULLIF -> COALESCE) so a feed missing a field doesn't wipe
+// what's already stored.
+func (s *Store) UpdateShowMeta(showID, title, description, image string) error {
+	_, err := s.pool.Exec(context.Background(),
+		`UPDATE shows
+		    SET title       = COALESCE(NULLIF($2, ''), title),
+		        description = COALESCE(NULLIF($3, ''), description),
+		        image_url   = COALESCE(NULLIF($4, ''), image_url),
+		        last_fetched = NOW()
+		  WHERE id = $1`,
+		showID, title, description, image)
+	return err
+}
+
+// UserShow is a show as it appears on a user's shows page. SourceFeedURL is the
+// publisher's feed; the personal proxy URL is built from Slug by the handler.
+type UserShow struct {
+	ShowID        string
+	Title         string
+	Description   string
+	ImageURL      string
+	SourceFeedURL string
+	Slug          string
+	SubscribedAt  time.Time
+}
+
+const userShowCols = `s.id, COALESCE(s.title, ''), COALESCE(s.description, ''),
+	COALESCE(s.image_url, ''), s.feed_url, us.friendly_unique_slug, us.subscribed_at`
+
+func scanUserShow(row pgx.Row) (UserShow, error) {
+	var us UserShow
+	err := row.Scan(&us.ShowID, &us.Title, &us.Description, &us.ImageURL,
+		&us.SourceFeedURL, &us.Slug, &us.SubscribedAt)
+	return us, err
+}
+
+// ListUserShows returns the user's registered shows, newest subscription first.
+func (s *Store) ListUserShows(userID string) ([]UserShow, error) {
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT `+userShowCols+`
+		   FROM user_shows us JOIN shows s ON s.id = us.show_id
+		  WHERE us.user_id = $1
+		  ORDER BY us.subscribed_at DESC`,
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UserShow
+	for rows.Next() {
+		us, err := scanUserShow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, us)
+	}
+	return out, rows.Err()
+}
+
+// UserShowByID returns one of the user's shows. ok is false when the show is
+// unknown or the user isn't subscribed (the caller turns that into a 404).
+func (s *Store) UserShowByID(userID, showID string) (UserShow, bool, error) {
+	us, err := scanUserShow(s.pool.QueryRow(context.Background(),
+		`SELECT `+userShowCols+`
+		   FROM user_shows us JOIN shows s ON s.id = us.show_id
+		  WHERE us.user_id = $1 AND s.id = $2`,
+		userID, showID))
+	if err == pgx.ErrNoRows {
+		return UserShow{}, false, nil
+	}
+	if err != nil {
+		return UserShow{}, false, err
+	}
+	return us, true, nil
+}
+
+// UserEpisode is one episode in a user's listening history for a show.
+type UserEpisode struct {
+	EpisodeID          string
+	Title              string
+	PubDate            *time.Time
+	TranscriptStatus   string
+	FirstPlayedAt      *time.Time
+	LastPlayedAt       *time.Time
+	TotalSecondsPlayed int
+}
+
+// ShowEpisodes returns the episodes the user has played from a show, most
+// recently played first.
+func (s *Store) ShowEpisodes(userID, showID string) ([]UserEpisode, error) {
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT e.id, COALESCE(e.title, ''), e.pub_date, e.transcript_status,
+		        ue.first_played_at, ue.last_played_at, ue.total_seconds_played
+		   FROM user_episodes ue JOIN episodes e ON e.id = ue.episode_id
+		  WHERE ue.user_id = $1 AND e.show_id = $2
+		  ORDER BY ue.last_played_at DESC`,
+		userID, showID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UserEpisode
+	for rows.Next() {
+		var e UserEpisode
+		if err := rows.Scan(&e.EpisodeID, &e.Title, &e.PubDate, &e.TranscriptStatus,
+			&e.FirstPlayedAt, &e.LastPlayedAt, &e.TotalSecondsPlayed); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}

@@ -12,6 +12,9 @@ CREATE TABLE users (
 CREATE TABLE shows (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     feed_url     TEXT UNIQUE NOT NULL,
+    title        TEXT,
+    description  TEXT,
+    image_url    TEXT,
     last_fetched TIMESTAMPTZ,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

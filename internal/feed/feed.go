@@ -45,6 +45,10 @@ func (h *Handler) rewriteEnclosures(feedXML []byte, userID, showID string) []byt
 		return feedXML
 	}
 
+	if err := h.store.UpdateShowMeta(showID, feed.Channel.Title, feed.Channel.Description, channelImage(feed.Channel)); err != nil {
+		log.Printf("Failed to update show metadata: %v", err)
+	}
+
 	out := string(feedXML)
 	for _, it := range feed.Channel.Items {
 		audioURL := it.Enclosure.URL
@@ -123,12 +127,22 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to fetch podcast feed from provided URL", http.StatusBadRequest)
 		return
 	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, "failed to read podcast feed", http.StatusBadRequest)
+		return
+	}
 	// Store the raw, fetchable URL (it is used verbatim to fetch the feed later).
 	showID, _, err := h.store.GetOrCreateShow(feedURL)
 	if err != nil {
 		log.Printf("Error: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
+	}
+
+	title, description, image := parseChannelMeta(body)
+	if err := h.store.UpdateShowMeta(showID, title, description, image); err != nil {
+		log.Printf("Failed to update show metadata: %v", err)
 	}
 
 	desiredSlug := genSlug(userID, showID, feedURL)
@@ -201,7 +215,35 @@ type rssFeed struct {
 	Channel channel  `xml:"channel"`
 }
 type channel struct {
-	Items []item `xml:"item"`
+	Title       string      `xml:"title"`
+	Description string      `xml:"description"`
+	Image       rssImage    `xml:"image"`
+	ITunesImage itunesImage `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd image"`
+	Items       []item      `xml:"item"`
+}
+type rssImage struct {
+	URL string `xml:"url"`
+}
+type itunesImage struct {
+	Href string `xml:"href,attr"`
+}
+
+// channelImage prefers the RSS <image><url>, falling back to iTunes artwork.
+func channelImage(c channel) string {
+	if c.Image.URL != "" {
+		return c.Image.URL
+	}
+	return c.ITunesImage.Href
+}
+
+// parseChannelMeta pulls show-level fields from raw feed bytes. Returns empties
+// on a parse failure; UpdateShowMeta then leaves existing values untouched.
+func parseChannelMeta(feedXML []byte) (title, description, image string) {
+	var feed rssFeed
+	if err := xml.Unmarshal(feedXML, &feed); err != nil {
+		return "", "", ""
+	}
+	return feed.Channel.Title, feed.Channel.Description, channelImage(feed.Channel)
 }
 type item struct {
 	GUID        string    `xml:"guid"` // CDATA is unwrapped into the string automatically
