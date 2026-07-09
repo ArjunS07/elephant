@@ -33,13 +33,16 @@ async function request(method, path, { body, query } = {}) {
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
 
-  if (res.status === 401) {
-    clearToken()
-    window.location.assign('/login')
-    throw new Error('unauthorized')
-  }
   if (!res.ok) {
-    throw new Error((await res.text()) || `request failed: ${res.status}`)
+    const message = (await res.text()).trim() || `request failed: ${res.status}`
+    // A 401 while we hold a token means the session expired -> bounce to login.
+    // A 401 without a token (e.g. a bad login) is just a failed request; let the
+    // caller show the message.
+    if (res.status === 401 && token) {
+      clearToken()
+      window.location.assign('/login')
+    }
+    throw new Error(message)
   }
   return res.status === 204 ? null : res.json()
 }
