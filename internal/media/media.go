@@ -1,7 +1,5 @@
 // Package media proxies episode audio through our server so we can record
-// listening activity (and, later, trigger transcription). The upstream URL is
-// never supplied by the caller. It is looked up from the episode row named by
-// the encrypted token, which closes the SSRF/open-proxy hole.
+// listening activity (and, later, trigger transcription).
 package media
 
 import (
@@ -16,7 +14,7 @@ import (
 	"elephant/internal/token"
 )
 
-// ASSUMED_BITRATE_KBPS is used to estimate seconds-played from bytes streamed.
+// Used to estimate seconds-played from bytes streamed.
 const ASSUMED_BITRATE_KBPS = 128
 
 // transcriptionThresholdSeconds is how much cumulative playback must stream

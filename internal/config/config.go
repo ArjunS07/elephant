@@ -16,8 +16,7 @@ type Config struct {
 	ModelboxURL   string
 }
 
-// Load reads configuration from the environment. A .env file is loaded
-// best-effort (ignored if absent, since env may be provided another way).
+// Read config from env
 func Load() Config {
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found or error loading .env file")

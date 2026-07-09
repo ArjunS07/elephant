@@ -1,7 +1,4 @@
-// Package store owns all database access. Handlers depend on *Store rather than
-// touching the connection pool directly. Methods mirror the original dbOps
-// functions verbatim (same SQL, same context.Background()); URL normalization
-// and slug generation live in the feed package, so callers pass ready values.
+// This package owns all database access
 package store
 
 import (
@@ -158,8 +155,7 @@ func (s *Store) SemanticSearch(userID string, queryVec []float32, limit int) ([]
 	return scanChunks(rows)
 }
 
-// LexicalSearch returns chunks matching the query text, ranked by ts_rank. An
-// empty result is normal (the query may have no lexical hits).
+// LexicalSearch returns chunks matching the query text, ranked by ts_rank.
 func (s *Store) LexicalSearch(userID, queryText string, limit int) ([]Chunk, error) {
 	rows, err := s.pool.Query(context.Background(),
 		`SELECT c.episode_id, c.idx, c.start_ms, c.end_ms, c.text, e.title
